@@ -5,7 +5,8 @@ BlazePose model test program for Intel Distribution of OpenVINO toolkit
 
 The BlazePose OpenVINO IR model can be obtained from [PINTO model zoo](https://github.com/PINTO0309/PINTO_model_zoo). 
 
-![Example](./resources/result.png)
+### Example
+![Example](./resources/output.gif)
 
 ## Configuration / Options
 Current program doesn't support command line options.  
@@ -16,11 +17,18 @@ const std::string MODEL_POSE_DET = "../pose_detection/128x128/FP32/pose_detectio
 const std::string MODEL_LM_DET   = "../pose_landmark_upper_body/256x256/FP32/pose_landmark_upper_body";
 
 // INPUT_TYPE = { IMAGE_INPUT | VIDEO_INPUT | CAM_INPUT }
-#define INPUT_TYPE    CAM_INPUT
-const std::string INPUT_FILE = "../test4.jpg";          /* Image or movie file */
-//const std::string INPUT_FILE = "../video.mp4";          /* Image or movie file */
+#define INPUT_TYPE    VIDEO_INPUT
+const std::string INPUT_FILE = "../test.mp4";              /* Image or movie file */
+
+// 'output.mp4' will be generated when this macro is defined and the input source is either one of VIDEO_INPUT or CAM_INPUT
+#define VIDEO_OUTPUT
+#define VIDEO_SIZE    (400)             /* output video size = (VIDEO_SIZE, VIDEO_SIZE) */
 
 // Device to use for inferencing. Possible options = "CPU", "GPU", "MYRIAD", "HDDL", "HETERO:FPGA,CPU", ...
 const std::string DEVICE_PD = "CPU";
 const std::string DEVICE_LM = "CPU";
+
+//#define RENDER_ROI
+#define RENDER_TIME
+#define RENDER_POINTS
 ```

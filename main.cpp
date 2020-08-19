@@ -28,13 +28,21 @@ const std::string MODEL_POSE_DET = "../pose_detection/128x128/FP32/pose_detectio
 const std::string MODEL_LM_DET   = "../pose_landmark_upper_body/256x256/FP32/pose_landmark_upper_body";
 
 // INPUT_TYPE = { IMAGE_INPUT | VIDEO_INPUT | CAM_INPUT }
-#define INPUT_TYPE    CAM_INPUT
-const std::string INPUT_FILE = "../test4.jpg";          /* Image or movie file */
-//const std::string INPUT_FILE = "../video.mp4";          /* Image or movie file */
+#define INPUT_TYPE    VIDEO_INPUT
+const std::string INPUT_FILE = "../boy.mp4";              /* Image or movie file */
+
+// 'output.mp4' will be generated when this macro is defined and the input source is either one of VIDEO_INPUT or CAM_INPUT
+#define VIDEO_OUTPUT
+#define VIDEO_SIZE    (400)             /* output video size = (VIDEO_SIZE, VIDEO_SIZE) */
 
 // Device to use for inferencing. Possible options = "CPU", "GPU", "MYRIAD", "HDDL", "HETERO:FPGA,CPU", ...
 const std::string DEVICE_PD = "CPU";
 const std::string DEVICE_LM = "CPU";
+
+//#define RENDER_ROI
+#define RENDER_TIME
+#define RENDER_POINTS
+
 
 
 namespace ie = InferenceEngine;
@@ -434,6 +442,14 @@ void renderROI(cv::Mat& img, const fvec2(&roi_coord)[4]) {
 
 
 void renderPose(cv::Mat& image_ocv, std::vector<detect_region_t>& detect_results, pose_landmark_result_t *landmarks) {
+    const std::vector<cv::Scalar> colors = {
+        cv::Scalar(255,   0,   0), cv::Scalar(255,  85,   0), cv::Scalar(255, 170,   0),
+        cv::Scalar(255, 255,   0), cv::Scalar(170, 255,   0), cv::Scalar( 85, 255,   0),
+        cv::Scalar(  0, 255,   0), cv::Scalar(  0, 255,  85), cv::Scalar(  0, 255, 170),
+        cv::Scalar(  0, 255, 255), cv::Scalar(  0, 170, 255), cv::Scalar(  0,  85, 255),
+        cv::Scalar(  0,   0, 255), cv::Scalar( 85,   0, 255), cv::Scalar(170,   0, 255),
+        cv::Scalar(255,   0, 255), cv::Scalar(255,   0, 170), cv::Scalar(255,   0,  85)
+    };
     const std::vector<std::vector<int>> bones = {
         {  0,  1,  2,  3,  7},
         {  0,  4,  5,  6,  8},
@@ -454,7 +470,7 @@ void renderPose(cv::Mat& image_ocv, std::vector<detect_region_t>& detect_results
         mat.resize(3, cv::Scalar(0.f));
         mat.at<double>(2, 2) = 1.f;
 
-        // Apply affine transform to the junction points
+        // Apply affine transform to project the junction points to the original ROI in the input image
         double px, py, flag;
         std::vector<std::pair<cv::Point2f, float>> pts;
         for (size_t i = 0; i < POSE_JOINT_NUM; i++) {
@@ -464,9 +480,10 @@ void renderPose(cv::Mat& image_ocv, std::vector<detect_region_t>& detect_results
             py = pt.at<double>(1, 0);
             flag = landmarks[pose_id].joint[i].z;
             pts.push_back(std::pair<cv::Point2f, float>(cv::Point2f(px, py), flag));
-            //cv::circle(image_ocv, cv::Point(pt.at<double>(0, 0), pt.at<double>(1, 0)), 4, cv::Scalar(255, 0, 0), -1);
+            cv::circle(image_ocv, cv::Point(pt.at<double>(0, 0), pt.at<double>(1, 0)), 4, cv::Scalar(255, 0, 0), -1);
         }
         // render bones
+        size_t color_idx = 0;
         for (auto& bone : bones) {
             size_t prev_idx = -1;
             for (auto& idx : bone) {
@@ -478,10 +495,16 @@ void renderPose(cv::Mat& image_ocv, std::vector<detect_region_t>& detect_results
                 cv::Point2f pt2 = pts[     idx].first;
                 float flag1 = pts[prev_idx].second;
                 float flag2 = pts[     idx].second;
-                cv::line(image_ocv, pt1, pt2, cv::Scalar(255, 0, 255), 2);
+                cv::Scalar color = colors[color_idx++ % colors.size()];
+                cv::line(image_ocv, pt1, pt2, color, 2);
                 prev_idx = idx;
             }
         }
+#ifdef RENDER_POINTS
+        for (auto& pt : pts ) {
+            cv::circle(image_ocv, pt.first, 4, cv::Scalar(255, 0, 0), -1);
+        }
+#endif
     }
 }
 
@@ -491,6 +514,8 @@ void renderTime(cv::Mat& img, double time_pd, double time_lm, double time_ttl) {
     cv::putText(img, cv::format("LM: %6.2fms", time_lm/1000.f), cv::Point(0, 30), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 0, 0), 1);
     cv::putText(img, cv::format("TTL: %6.2fms", time_ttl / 1000.f), cv::Point(0, 50), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 0, 0), 1);
 }
+
+
 
 int main(int argc, char *argv[]) {
 
@@ -552,6 +577,13 @@ int main(int argc, char *argv[]) {
 #elif INPUT_TYPE == CAM_INPUT
     cv::VideoCapture cap(0);
 #endif
+
+#if INPUT_TYPE == VIDEO_INPUT || INPUT_TYPE == CAM_INPUT
+#ifdef VIDEO_OUTPUT
+    cv::VideoWriter writer("output.mp4", cv::VideoWriter::fourcc('m', 'p', '4', 'v'), 30.0, cv::Size(VIDEO_SIZE, VIDEO_SIZE));
+#endif
+#endif
+
 
     int key = -1;
     while (key != 27) {     // ESC key to quit
@@ -634,13 +666,17 @@ int main(int argc, char *argv[]) {
                 landmarks[pose_id].joint[i].y = lm[4 * i + 1] / (float)idims_lm[_H];
                 landmarks[pose_id].joint[i].z = lm[4 * i + 2];
             }
-            //renderROI(image_ocv, pose.roi_coord);
+#ifdef RENDER_ROI
+            renderROI(image_ocv, pose.roi_coord);
+#endif
             renderPose(image_ocv, detect_results, landmarks);
         }
         end_ttl = std::chrono::system_clock::now();
         time_ttl = std::chrono::duration_cast<std::chrono::microseconds>(end_ttl - start_ttl);
 
+#ifdef RENDER_TIME
         renderTime(image_ocv, time_pd.count(), time_lm.count(), time_ttl.count());
+#endif
 
 #if INPUT_TYPE == IMAGE_INPUT
         cv::imwrite("output.jpg", image_ocv);
@@ -650,65 +686,11 @@ int main(int argc, char *argv[]) {
 #elif INPUT_TYPE == VIDEO_INPUT || INPUT_TYPE == CAM_INPUT
         cv::imshow("output", image_ocv);
         key = cv::waitKey(1);
+#ifdef VIDEO_OUTPUT
+        cv::resize(image_ocv, image_ocv, cv::Size(VIDEO_SIZE, VIDEO_SIZE));
+        writer << image_ocv;
+#endif
 #endif
     }
     return 0;
 }
-
-#if 0    // cheat memo
-id :0
-Score : 0.80571, topleft : (0.599791, 0.322176) btmright(0.803113, 0.525553)
-keys : (0.592301, 0.60807) (0.765157, 0.279203) (0.694426, 0.464116) (0.794771, 0.27079)
-rotation(0.617028, roi_center(0.694426, 0.464116), roi_size(0.65345, 0.65345)
-roi_coord[0] = (0.616996, 0.00859112) roi_coord[1] = (1.14995, 0.386686) roi_coord[2] = (0.771856, 0.919642) roi_coord[3] = (0.238901, 0.541547)
-
-
-typedef struct _detect_region_t
-{
-    float score;
-    fvec2 topleft;
-    fvec2 btmright;
-    fvec2 keys[kPoseDetectKeyNum];
-
-    float  rotation;
-    fvec2  roi_center;
-    fvec2  roi_size;
-    fvec2  roi_coord[4];
-} detect_region_t;
-
-struct _pose_detect_result_t
-{
-    int num;
-    detect_region_t poses[MAX_POSE_NUM];
-}
-id:0
-Score : 0.80571, topleft : (0.599791, 0.322176) btmright(0.803113, 0.525553)
-keys : (0.592301, 0.60807) (0.765157, 0.279203) (0.694426, 0.464116) (0.794771, 0.27079)
-rotation(0.617028, roi_center(0.694426, 0.464116), roi_size(0.65345, 0.65345)
-    roi_coord[0] = (0.616996, 0.00859112) roi_coord[1] = (1.14995, 0.386686) roi_coord[2] = (0.771856, 0.919642) roi_coord[3] = (0.238901, 0.541547)
-    103.5, 99.6409, -0.118641
-    106.968, 95.2421, -0.599489
-    107.992, 95.073, -0.879786
-    109.055, 94.9266, 0.589533
-    106.99, 95.3374, -0.63118
-    108.001, 95.3395, -0.185324
-    108.963, 95.3678, 1.58586
-    116.709, 96.6343, 1.33967
-    116.567, 96.885, 1.53691
-    107.784, 104.388, -0.353246
-    107.213, 104.764, 0.94916
-    123.701, 123.332, -67.1285
-    122.666, 128.015, 64.7882
-    80.9464, 139.919, -90.088
-    83.8278, 144.983, 53.8685
-    41.4329, 147.431, 96.8092
-    49.1288, 150.342, -43.2139
-    32.8085, 145.617, 0.113534
-    43.4589, 146.909, -0.993368
-    33.1729, 142.45, -1.34155
-    42.0035, 144.318, 0.271668
-    35.7591, 145.685, 0.440072
-    43.3881, 146.493, 0.722159
-    126.391, 183.047, -5.03068
-    121.725, 179.694, 124.67
-#endif  
