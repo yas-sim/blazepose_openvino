@@ -13,15 +13,29 @@
 
 #include <vector>
 #include <string>
+#include <chrono>
 
 #include <opencv2/opencv.hpp>
 #include <inference_engine.hpp>
 
 #include "blazepose.h"
 
-const std::string MODEL_POSE_DET = "../pose_detection/128x128/FP16/pose_detection";
-const std::string MODEL_LM_DET   = "../pose_landmark_upper_body/256x256/FP16/pose_landmark_upper_body";
-const std::string INPUT_IMAGE    = "../test5.jpg";
+#define IMAGE_INPUT    (1)
+#define VIDEO_INPUT    (2)
+#define CAM_INPUT      (3)
+
+const std::string MODEL_POSE_DET = "../pose_detection/128x128/FP32/pose_detection";
+const std::string MODEL_LM_DET   = "../pose_landmark_upper_body/256x256/FP32/pose_landmark_upper_body";
+
+// INPUT_TYPE = { IMAGE_INPUT | VIDEO_INPUT | CAM_INPUT }
+#define INPUT_TYPE    CAM_INPUT
+const std::string INPUT_FILE = "../test4.jpg";          /* Image or movie file */
+//const std::string INPUT_FILE = "../video.mp4";          /* Image or movie file */
+
+// Device to use for inferencing. Possible options = "CPU", "GPU", "MYRIAD", "HDDL", "HETERO:FPGA,CPU", ...
+const std::string DEVICE_PD = "CPU";
+const std::string DEVICE_LM = "CPU";
+
 
 namespace ie = InferenceEngine;
 
@@ -40,7 +54,7 @@ void GenerateAnchors(std::vector<Anchor>& anchors, const SsdAnchorsCalculatorOpt
         std::vector<float> anchor_width;
         std::vector<float> aspect_ratios;
         std::vector<float> scales;
-
+        
         // For same strides, we merge the anchors in the same order.
         int last_same_stride_layer = layer_id;
         while (last_same_stride_layer < (int)options.strides.size() &&
@@ -471,8 +485,17 @@ void renderPose(cv::Mat& image_ocv, std::vector<detect_region_t>& detect_results
     }
 }
 
+void renderTime(cv::Mat& img, double time_pd, double time_lm, double time_ttl) {
+
+    cv::putText(img, cv::format("PD: %6.2fms", time_pd/1000.f), cv::Point(0, 10), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 0, 0), 1);
+    cv::putText(img, cv::format("LM: %6.2fms", time_lm/1000.f), cv::Point(0, 30), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 0, 0), 1);
+    cv::putText(img, cv::format("TTL: %6.2fms", time_ttl / 1000.f), cv::Point(0, 50), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 0, 0), 1);
+}
 
 int main(int argc, char *argv[]) {
+
+    std::chrono::system_clock::time_point start, end, start_ttl, end_ttl;
+    std::chrono::microseconds time_pd, time_lm, time_ttl;
 
     ie::Core ie;
 
@@ -493,7 +516,7 @@ int main(int argc, char *argv[]) {
         output_info->setPrecision(ie::Precision::FP32);
     }
 
-    ie::ExecutableNetwork exenet_pd = ie.LoadNetwork(net_pd, "CPU");
+    ie::ExecutableNetwork exenet_pd = ie.LoadNetwork(net_pd, DEVICE_PD);
     ie::InferRequest ireq_pd = exenet_pd.CreateInferRequest();
 
 
@@ -516,7 +539,7 @@ int main(int argc, char *argv[]) {
         output_info->setPrecision(ie::Precision::FP32);
     }
 
-    ie::ExecutableNetwork exenet_lm = ie.LoadNetwork(net_lm, "CPU");
+    ie::ExecutableNetwork exenet_lm = ie.LoadNetwork(net_lm, DEVICE_LM);
     ie::InferRequest ireq_lm = exenet_lm.CreateInferRequest();
 
 
@@ -524,76 +547,111 @@ int main(int argc, char *argv[]) {
     std::vector<Anchor> anchors;
     create_ssd_anchors(idims_pd[3], idims_pd[2], anchors);
 
+#if   INPUT_TYPE == VIDEO_INPUT
+    cv::VideoCapture cap(INPUT_FILE);
+#elif INPUT_TYPE == CAM_INPUT
+    cv::VideoCapture cap(0);
+#endif
 
-    // read an image and trim down to square image
-    const size_t _N = 0, _C = 1, _H = 2, _W = 3;
-    cv::Mat image_ocv, image_pd, image_lm, image_f;
-    cv::Mat image_org = cv::imread(INPUT_IMAGE);
-    size_t iw = image_org.size().width;
-    size_t ih = image_org.size().height;
-    if (iw > ih) {
-        image_ocv = image_org(cv::Rect(iw / 2 - ih / 2, 0, ih, ih));
-    }
-    else if (iw < ih) {
-        image_ocv = image_org(cv::Rect(0, ih / 2 - iw / 2, iw, iw));
-    }
-    
-    // pose (ROI) detection
-    cv::resize(image_ocv, image_pd, cv::Size(idims_pd[_W], idims_pd[_H]));
-    image_pd.convertTo(image_f, CV_32F, (1/127.5f), -1.f);                      // Convert to FP32 and do pre-processes (scale and mean subtract)
-    ie::TensorDesc tDesc(ie::Precision::FP32, {1, static_cast<unsigned int>(image_f.channels()), static_cast<unsigned int>(image_f.size().height), static_cast<unsigned int>(image_f.size().width) }, ie::Layout::NHWC);
-    ireq_pd.SetBlob(input_name_pd, ie::make_shared_blob<float>(tDesc, (float*)(image_f.data)));
+    int key = -1;
+    while (key != 27) {     // ESC key to quit
 
-    ireq_pd.Infer();                                                            // Pose detection
-    float* scores = ireq_pd.GetBlob(oname_pd[0])->buffer();
-    float* bboxes = ireq_pd.GetBlob(oname_pd[1])->buffer();
+        // read an image and trim down to square image
+        const size_t _N = 0, _C = 1, _H = 2, _W = 3;
+        cv::Mat image_ocv, image_pd, image_lm, image_f;
+        cv::Mat image_org;
+#if INPUT_TYPE == IMAGE_INPUT
+        image_org = cv::imread(INPUT_FILE);
+#elif INPUT_TYPE == VIDEO_INPUT || INPUT_TYPE == CAM_INPUT
+        bool flg = cap.read(image_org);
+        if (flg == false) break;                        // end of the movie file
+#endif
+        start_ttl = std::chrono::system_clock::now();
 
-    std::list<detect_region_t> region_list, region_nms_list;
-    std::vector<detect_region_t> detect_results;
-    decode_bounds(region_list, 0.5f, idims_pd[_W], idims_pd[_H], scores, bboxes, anchors);
-    non_max_suppression(region_list, region_nms_list, 0.7f);
-    pack_detect_result(detect_results, region_nms_list, idims_pd);
-
-
-    // landmark detection
-    size_t W = image_ocv.size().width;
-    size_t H = image_ocv.size().height;
-    pose_landmark_result_t  landmarks[MAX_POSE_NUM] = { 0 };
-    for (size_t pose_id = 0; pose_id < detect_results.size(); pose_id++) {
-
-        detect_region_t pose = detect_results[pose_id];
-
-        cv::Point2f mat_src[] = { cv::Point2f(pose.roi_coord[0].x * W, pose.roi_coord[0].y * H),
-                                  cv::Point2f(pose.roi_coord[1].x * W, pose.roi_coord[1].y * H),
-                                  cv::Point2f(pose.roi_coord[2].x * W, pose.roi_coord[2].y * H) };
-        cv::Point2f mat_dst[] = { cv::Point2f(0, 0), cv::Point2f(idims_lm[_W], 0), cv::Point2f(idims_lm[_W], idims_lm[_H]) };
-        cv::Mat mat = cv::getAffineTransform(mat_src, mat_dst);
-        cv::Mat img_affine = cv::Mat::zeros(idims_lm[_W], idims_lm[_H], CV_8UC3);
-        cv::warpAffine(image_ocv, img_affine, mat, img_affine.size());              // Crop and rotate ROI by warp affine transform
-
-        img_affine.convertTo(image_f, CV_32F, (1 / 127.5f), -1.f);
-        tDesc = ie::TensorDesc(ie::Precision::FP32, { 1, (unsigned int)(image_f.channels()), (unsigned int)(image_f.size().height), (unsigned int)(image_f.size().width) }, ie::Layout::NHWC);
-        ireq_lm.SetBlob(input_name_lm, ie::make_shared_blob<float>(tDesc, (float*)(image_f.data)));
-
-        ireq_lm.Infer();                                                // Landmark detection
-
-        float* output_lm1 = ireq_lm.GetBlob(oname_lm[0])->buffer();     // ??
-        float* lm_score   = ireq_lm.GetBlob(oname_lm[1])->buffer();     // Landmark score (flag)
-        float* lm         = ireq_lm.GetBlob(oname_lm[2])->buffer();     // Landmarks
-
-        landmarks[pose_id].score = *lm_score;
-        for (size_t i = 0; i < POSE_JOINT_NUM; i++) {
-            landmarks[pose_id].joint[i].x = lm[4 * i + 0] / (float)idims_lm[_W];
-            landmarks[pose_id].joint[i].y = lm[4 * i + 1] / (float)idims_lm[_H];
-            landmarks[pose_id].joint[i].z = lm[4 * i + 2];
+        // resize input image with keeping aspect ratio
+        size_t iw = image_org.size().width;
+        size_t ih = image_org.size().height;
+        if (iw > ih) {
+            image_ocv = image_org(cv::Rect(iw / 2 - ih / 2, 0, ih, ih));
         }
-        renderROI(image_ocv, pose.roi_coord);
-        renderPose(image_ocv, detect_results, landmarks);
-    }
-    cv::imwrite("output.jpg", image_ocv);
-    cv::imshow("output", image_ocv);
-    cv::waitKey(0);
+        else if (iw < ih) {
+            image_ocv = image_org(cv::Rect(0, ih / 2 - iw / 2, iw, iw));
+        }
 
+        // pose (ROI) detection
+        cv::resize(image_ocv, image_pd, cv::Size(idims_pd[_W], idims_pd[_H]));
+        image_pd.convertTo(image_f, CV_32F, (1 / 127.5f), -1.f);                      // Convert to FP32 and do pre-processes (scale and mean subtract)
+        ie::TensorDesc tDesc(ie::Precision::FP32, { 1, static_cast<unsigned int>(image_f.channels()), static_cast<unsigned int>(image_f.size().height), static_cast<unsigned int>(image_f.size().width) }, ie::Layout::NHWC);
+        ireq_pd.SetBlob(input_name_pd, ie::make_shared_blob<float>(tDesc, (float*)(image_f.data)));
+
+        start = std::chrono::system_clock::now();
+        ireq_pd.Infer();                                                            // Pose detection
+        end = std::chrono::system_clock::now();
+        time_pd = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+        float* scores = ireq_pd.GetBlob(oname_pd[0])->buffer();
+        float* bboxes = ireq_pd.GetBlob(oname_pd[1])->buffer();
+
+        std::list<detect_region_t> region_list, region_nms_list;
+        std::vector<detect_region_t> detect_results;
+        decode_bounds(region_list, 0.5f, idims_pd[_W], idims_pd[_H], scores, bboxes, anchors);
+        non_max_suppression(region_list, region_nms_list, 0.3f);
+        pack_detect_result(detect_results, region_nms_list, idims_pd);
+
+
+        // landmark detection
+        size_t W = image_ocv.size().width;
+        size_t H = image_ocv.size().height;
+        pose_landmark_result_t  landmarks[MAX_POSE_NUM] = { 0 };
+        for (size_t pose_id = 0; pose_id < detect_results.size(); pose_id++) {
+
+            detect_region_t pose = detect_results[pose_id];
+
+            cv::Point2f mat_src[] = { cv::Point2f(pose.roi_coord[0].x * W, pose.roi_coord[0].y * H),
+                                      cv::Point2f(pose.roi_coord[1].x * W, pose.roi_coord[1].y * H),
+                                      cv::Point2f(pose.roi_coord[2].x * W, pose.roi_coord[2].y * H) };
+            cv::Point2f mat_dst[] = { cv::Point2f(0, 0), cv::Point2f(idims_lm[_W], 0), cv::Point2f(idims_lm[_W], idims_lm[_H]) };
+            cv::Mat mat = cv::getAffineTransform(mat_src, mat_dst);
+            cv::Mat img_affine = cv::Mat::zeros(idims_lm[_W], idims_lm[_H], CV_8UC3);
+            cv::warpAffine(image_ocv, img_affine, mat, img_affine.size());              // Crop and rotate ROI by warp affine transform
+
+            img_affine.convertTo(image_f, CV_32F, (1 / 127.5f), -1.f);
+            tDesc = ie::TensorDesc(ie::Precision::FP32, { 1, (unsigned int)(image_f.channels()), (unsigned int)(image_f.size().height), (unsigned int)(image_f.size().width) }, ie::Layout::NHWC);
+            ireq_lm.SetBlob(input_name_lm, ie::make_shared_blob<float>(tDesc, (float*)(image_f.data)));
+
+            start = std::chrono::system_clock::now();
+            ireq_lm.Infer();                                                // Landmark detection
+            end = std::chrono::system_clock::now();
+            time_lm = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+            float* output_lm1 = ireq_lm.GetBlob(oname_lm[0])->buffer();     // ??
+            float* lm_score   = ireq_lm.GetBlob(oname_lm[1])->buffer();     // Landmark score (flag)
+            float* lm         = ireq_lm.GetBlob(oname_lm[2])->buffer();     // Landmarks
+
+            landmarks[pose_id].score = *lm_score;
+            for (size_t i = 0; i < POSE_JOINT_NUM; i++) {
+                landmarks[pose_id].joint[i].x = lm[4 * i + 0] / (float)idims_lm[_W];
+                landmarks[pose_id].joint[i].y = lm[4 * i + 1] / (float)idims_lm[_H];
+                landmarks[pose_id].joint[i].z = lm[4 * i + 2];
+            }
+            //renderROI(image_ocv, pose.roi_coord);
+            renderPose(image_ocv, detect_results, landmarks);
+        }
+        end_ttl = std::chrono::system_clock::now();
+        time_ttl = std::chrono::duration_cast<std::chrono::microseconds>(end_ttl - start_ttl);
+
+        renderTime(image_ocv, time_pd.count(), time_lm.count(), time_ttl.count());
+
+#if INPUT_TYPE == IMAGE_INPUT
+        cv::imwrite("output.jpg", image_ocv);
+        cv::imshow("output", image_ocv);
+        cv::waitKey(0);
+        key = 27;       // force exit
+#elif INPUT_TYPE == VIDEO_INPUT || INPUT_TYPE == CAM_INPUT
+        cv::imshow("output", image_ocv);
+        key = cv::waitKey(1);
+#endif
+    }
     return 0;
 }
 
