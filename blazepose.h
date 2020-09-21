@@ -11,8 +11,14 @@ extern "C" {
 #endif
 
 #define MAX_POSE_NUM  100
-#define POSE_JOINT_NUM 25
 
+#ifndef FULL_POSE
+#define POSE_JOINT_NUM 25
+#else
+#define POSE_JOINT_NUM 33
+#endif
+
+#ifndef FULL_POSE
     enum pose_detect_key_id {
         kMidHipCenter = 0,      //  0
         kFullBodySizeRot,       //  1
@@ -21,6 +27,14 @@ extern "C" {
 
         kPoseDetectKeyNum
     };
+#else
+    enum pose_detect_key_id {
+        kMidHipCenter = 0,      //  0
+        kFullBodySizeRot,       //  1
+
+        kPoseDetectKeyNum
+    };
+#endif
 
     typedef struct _fvec2
     {

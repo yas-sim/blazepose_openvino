@@ -18,18 +18,37 @@
 #include <opencv2/opencv.hpp>
 #include <inference_engine.hpp>
 
+#define FULL_POSE
 #include "blazepose.h"
 
 #define IMAGE_INPUT    (1)
 #define VIDEO_INPUT    (2)
 #define CAM_INPUT      (3)
 
+#ifndef FULL_POSE
 const std::string MODEL_POSE_DET = "../pose_detection/128x128/FP32/pose_detection";
 const std::string MODEL_LM_DET   = "../pose_landmark_upper_body/256x256/FP32/pose_landmark_upper_body";
+#else
+const std::string MODEL_POSE_DET = "../pose_detection_full/128x128/FP16/pose_detection_full";
+  //Input Blob(s):
+  //  BlobName:input, Shape:[1, 3, 128, 128], Precision:FP32
+  //Output Blob(s):
+  //  BlobName:StatefulPartitionedCall/functional_1/classificators/concat, Shape:[1, 896, 1], Precision:FP32
+  //  BlobName:StatefulPartitionedCall/functional_1/regressors/concat, Shape:[1, 896, 8], Precision:FP32
+const std::string MODEL_LM_DET   = "../pose_landmark_full_body/256x256/FP16/pose_landmark_full_body";
+  //Input Blob(s):
+  //  BlobName:input, Shape:[1, 3, 256, 256], Precision:FP32
+  //Output Blob(s):
+  //  BlobName:StatefulPartitionedCall/functional_1/output_segmentation/BiasAdd/Add, Shape:[1, 1, 128, 128], Precision:FP32
+  //  BlobName:StatefulPartitionedCall/functional_1/tf_op_layer_Sigmoid/Sigmoid, Shape:[1, 1, 1, 1], Precision:FP32
+  //  BlobName:StatefulPartitionedCall/functional_1/tf_op_layer_ld_3d/ld_3d, Shape:[1, 156], Precision:FP32
+#endif
 
 // INPUT_TYPE = { IMAGE_INPUT | VIDEO_INPUT | CAM_INPUT }
 #define INPUT_TYPE    VIDEO_INPUT
-const std::string INPUT_FILE = "../boy.mp4";              /* Image or movie file */
+const std::string INPUT_FILE = "../boy.mp4";                    /* Image or movie file */
+//const std::string INPUT_FILE = "../capoeira.mp4";             /* Image or movie file */
+//const std::string INPUT_FILE = "../people-detection.mp4";     /* Image or movie file */
 
 // 'output.mp4' will be generated when this macro is defined and the input source is either one of VIDEO_INPUT or CAM_INPUT
 #define VIDEO_OUTPUT
@@ -39,6 +58,7 @@ const std::string INPUT_FILE = "../boy.mp4";              /* Image or movie file
 const std::string DEVICE_PD = "CPU";
 const std::string DEVICE_LM = "CPU";
 
+// ** Define or Undefine to control the items to display
 //#define RENDER_ROI
 #define RENDER_TIME
 #define RENDER_POINTS
@@ -173,18 +193,18 @@ void create_ssd_anchors(int input_w, int input_h, std::vector<Anchor> &anchors) 
     GenerateAnchors(anchors, anchor_options);
 }
 
-float* get_bbox_ptr(int anchor_idx, float* bboxes_ptr) {
+int get_bbox_idx(int anchor_idx) {
     /*
      *  cx, cy, width, height
-     *  key0_x, key0_y
-     *  key1_x, key1_y
-     *  key2_x, key2_y
-     *  key3_x, key3_y
+     *  key0_x, key0_y      kMidHipCenter
+     *  key1_x, key1_y      kFullBodySizeRot
+     *  key2_x, key2_y      kMidShoulderCenter - upper body only
+     *  key3_x, key3_y      kUpperBodySizeRot  - upper body only
      */
-    int numkey = kPoseDetectKeyNum;
+    int numkey = kPoseDetectKeyNum;   // FullBody:4, UpperBody:2
     int idx = (4 + 2 * numkey) * anchor_idx;
 
-    return &(bboxes_ptr[idx]);
+    return idx;
 }
 
 int decode_bounds(std::list<detect_region_t>& region_list, float score_thresh, int input_img_w, int input_img_h, float* scores_ptr, float* bboxes_ptr, std::vector<Anchor>& anchors) {
@@ -193,25 +213,16 @@ int decode_bounds(std::list<detect_region_t>& region_list, float score_thresh, i
     for (auto &anchor : anchors) {
         float score0 = scores_ptr[i];
         float score = 1.0f / (1.0f + exp(-score0));
-        //std::cout << score << std::endl;
 
         if (score > score_thresh)
         {
-            float* p = get_bbox_ptr(i, bboxes_ptr);
+            float* p = bboxes_ptr + get_bbox_idx(i);
 
             /* boundary box */
-            float sx = p[0];
-            float sy = p[1];
-            float w  = p[2];
-            float h  = p[3];
-
-            float cx = sx + anchor.x_center * input_img_w;
-            float cy = sy + anchor.y_center * input_img_h;
-
-            cx /= (float)input_img_w;
-            cy /= (float)input_img_h;
-            w  /= (float)input_img_w;
-            h  /= (float)input_img_h;
+            float cx = p[0] / input_img_w + anchor.x_center;
+            float cy = p[1] / input_img_h + anchor.y_center;
+            float w  = p[2] / input_img_w;
+            float h  = p[3] / input_img_h;
 
             fvec2 topleft, btmright;
             topleft.x  = cx - w * 0.5f;
@@ -320,11 +331,17 @@ float normalize_radians(float angle)
 }
 
 void compute_rotation(detect_region_t& region) {
+#ifndef FULL_POSE
     float x0 = region.keys[kMidHipCenter].x;
     float y0 = region.keys[kMidHipCenter].y;
     float x1 = region.keys[kMidShoulderCenter].x;
     float y1 = region.keys[kMidShoulderCenter].y;
-
+#else
+    float x0 = region.keys[kMidHipCenter].x;
+    float y0 = region.keys[kMidHipCenter].y;
+    float x1 = (region.topleft.x + region.btmright.x) * 0.5f;
+    float y1 = (region.topleft.y + region.btmright.y) * 0.5f;
+#endif
     float target_angle = M_PI * 0.5f;
     float rotation = target_angle - std::atan2(-(y1 - y0), x1 - x0);
 
@@ -341,11 +358,17 @@ void rot_vec(fvec2& vec, float rotation) {
 void compute_detect_to_roi(detect_region_t& region, const ie::SizeVector& dims) {
     int input_img_w = dims[3];
     int input_img_h = dims[2];
+#ifndef FULL_POSE
     float x_center = region.keys[kMidShoulderCenter].x * input_img_w;
     float y_center = region.keys[kMidShoulderCenter].y * input_img_h;
-    float x_scale  = region.keys[kUpperBodySizeRot] .x * input_img_w;
-    float y_scale  = region.keys[kUpperBodySizeRot] .y * input_img_h;
-
+    float x_scale  = region.keys[kUpperBodySizeRot ].x * input_img_w;
+    float y_scale  = region.keys[kUpperBodySizeRot ].y * input_img_h;
+#else
+    float x_center = region.keys[kMidHipCenter   ].x * input_img_w;
+    float y_center = region.keys[kMidHipCenter   ].y * input_img_h;
+    float x_scale  = region.keys[kFullBodySizeRot].x * input_img_w;
+    float y_scale  = region.keys[kFullBodySizeRot].y * input_img_h;
+#endif
     // Bounding box size as double distance from center to scale point.
     float box_size = std::sqrt((x_scale - x_center) * (x_scale - x_center) +
                                (y_scale - y_center) * (y_scale - y_center)) * 2.0;
@@ -434,7 +457,9 @@ void renderROI(cv::Mat& img, const fvec2(&roi_coord)[4]) {
     size_t h = img.size().height;
     std::vector<cv::Point> p;
     for (size_t i = 0; i < 4; i++) {
-        p.push_back(cv::Point(roi_coord[i].x * w, roi_coord[i].y * h));
+        cv::Point pt = cv::Point(roi_coord[i].x * w, roi_coord[i].y * h);
+        p.push_back(pt);
+        cv::putText(img, std::to_string(i), pt, cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255,255,255), 1);
     }
     cv::polylines(img, p, true, cv::Scalar(255, 0, 0), 2, cv::LINE_AA);
 }
@@ -451,12 +476,16 @@ void renderPose(cv::Mat& image_ocv, std::vector<detect_region_t>& detect_results
         cv::Scalar(255,   0, 255), cv::Scalar(255,   0, 170), cv::Scalar(255,   0,  85)
     };
     const std::vector<std::vector<int>> bones = {
-        {  0,  1,  2,  3,  7},
-        {  0,  4,  5,  6,  8},
-        {  9, 10},
-        { 11, 12, 24, 23, 11},
-        { 11, 13, 15, 17, 19, 15, 21},
-        { 12, 14, 16, 18, 20, 16, 22}
+        {  0,  1,  2,  3,  7},          // 0 right eye and ear
+        {  0,  4,  5,  6,  8},          // 1 left eye and ear
+        {  9, 10},                      // 2 mouth
+        { 11, 12, 24, 23, 11},          // 3 body
+        { 11, 13, 15, 17, 19, 15, 21},  // 4 right arm
+        { 12, 14, 16, 18, 20, 16, 22}   // 5 left arm
+#ifdef FULL_POSE
+       ,{ 23, 25, 27, 29, 31, 27 },     // 6 right leg
+        { 24, 26, 28, 30, 32, 28}       // 7 left leg
+#endif
     };
     size_t W = image_ocv.size().width;
     size_t H = image_ocv.size().height;
@@ -483,7 +512,7 @@ void renderPose(cv::Mat& image_ocv, std::vector<detect_region_t>& detect_results
             cv::circle(image_ocv, cv::Point(pt.at<double>(0, 0), pt.at<double>(1, 0)), 4, cv::Scalar(255, 0, 0), -1);
         }
         // render bones
-        size_t color_idx = 0;
+        size_t bone_idx = 0;
         for (auto& bone : bones) {
             size_t prev_idx = -1;
             for (auto& idx : bone) {
@@ -495,7 +524,7 @@ void renderPose(cv::Mat& image_ocv, std::vector<detect_region_t>& detect_results
                 cv::Point2f pt2 = pts[     idx].first;
                 float flag1 = pts[prev_idx].second;
                 float flag2 = pts[     idx].second;
-                cv::Scalar color = colors[color_idx++ % colors.size()];
+                cv::Scalar color = colors[bone_idx++ % colors.size()];
                 cv::line(image_ocv, pt1, pt2, color, 2);
                 prev_idx = idx;
             }
@@ -612,7 +641,8 @@ int main(int argc, char *argv[]) {
 
         // pose (ROI) detection
         cv::resize(image_ocv, image_pd, cv::Size(idims_pd[_W], idims_pd[_H]));
-        image_pd.convertTo(image_f, CV_32F, (1 / 127.5f), -1.f);                      // Convert to FP32 and do pre-processes (scale and mean subtract)
+        //image_pd.convertTo(image_f, CV_32F, (1.f / 255.f), 0.f);                    // Convert to FP32 and do pre-processes (scale and mean subtract)
+        image_pd.convertTo(image_f, CV_32F, (1.f / 127.5f), -1.f);                    // Convert to FP32 and do pre-processes (scale and mean subtract)
         ie::TensorDesc tDesc(ie::Precision::FP32, { 1, static_cast<unsigned int>(image_f.channels()), static_cast<unsigned int>(image_f.size().height), static_cast<unsigned int>(image_f.size().width) }, ie::Layout::NHWC);
         ireq_pd.SetBlob(input_name_pd, ie::make_shared_blob<float>(tDesc, (float*)(image_f.data)));
 
@@ -621,6 +651,8 @@ int main(int argc, char *argv[]) {
         end = std::chrono::system_clock::now();
         time_pd = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
+        //  BlobName:StatefulPartitionedCall/functional_1/classificators/concat, Shape:[1, 896, 1], Precision:FP32
+        //  BlobName:StatefulPartitionedCall/functional_1/regressors/concat, Shape:[1, 896, 8], Precision:FP32
         float* scores = ireq_pd.GetBlob(oname_pd[0])->buffer();
         float* bboxes = ireq_pd.GetBlob(oname_pd[1])->buffer();
 
@@ -630,8 +662,8 @@ int main(int argc, char *argv[]) {
         non_max_suppression(region_list, region_nms_list, 0.3f);
         pack_detect_result(detect_results, region_nms_list, idims_pd);
 
-
         // landmark detection
+        cv::Mat outimg = image_ocv.clone();             // clone input image for rendering
         size_t W = image_ocv.size().width;
         size_t H = image_ocv.size().height;
         pose_landmark_result_t  landmarks[MAX_POSE_NUM] = { 0 };
@@ -647,7 +679,8 @@ int main(int argc, char *argv[]) {
             cv::Mat img_affine = cv::Mat::zeros(idims_lm[_W], idims_lm[_H], CV_8UC3);
             cv::warpAffine(image_ocv, img_affine, mat, img_affine.size());              // Crop and rotate ROI by warp affine transform
 
-            img_affine.convertTo(image_f, CV_32F, (1 / 127.5f), -1.f);
+            //img_affine.convertTo(image_f, CV_32F, (1.f / 255.f), 0.f);
+            img_affine.convertTo(image_f, CV_32F, (1.f / 127.5f), -1.f);
             tDesc = ie::TensorDesc(ie::Precision::FP32, { 1, (unsigned int)(image_f.channels()), (unsigned int)(image_f.size().height), (unsigned int)(image_f.size().width) }, ie::Layout::NHWC);
             ireq_lm.SetBlob(input_name_lm, ie::make_shared_blob<float>(tDesc, (float*)(image_f.data)));
 
@@ -667,28 +700,28 @@ int main(int argc, char *argv[]) {
                 landmarks[pose_id].joint[i].z = lm[4 * i + 2];
             }
 #ifdef RENDER_ROI
-            renderROI(image_ocv, pose.roi_coord);
+            renderROI(outimg, pose.roi_coord);
 #endif
-            renderPose(image_ocv, detect_results, landmarks);
+            renderPose(outimg, detect_results, landmarks);
         }
         end_ttl = std::chrono::system_clock::now();
         time_ttl = std::chrono::duration_cast<std::chrono::microseconds>(end_ttl - start_ttl);
 
 #ifdef RENDER_TIME
-        renderTime(image_ocv, time_pd.count(), time_lm.count(), time_ttl.count());
+        renderTime(outimg, time_pd.count(), time_lm.count(), time_ttl.count());
 #endif
 
 #if INPUT_TYPE == IMAGE_INPUT
-        cv::imwrite("output.jpg", image_ocv);
-        cv::imshow("output", image_ocv);
+        cv::imwrite("output.jpg", outimg);
+        cv::imshow("output", outimg);
         cv::waitKey(0);
         key = 27;       // force exit
 #elif INPUT_TYPE == VIDEO_INPUT || INPUT_TYPE == CAM_INPUT
-        cv::imshow("output", image_ocv);
+        cv::imshow("output", outimg);
         key = cv::waitKey(1);
 #ifdef VIDEO_OUTPUT
-        cv::resize(image_ocv, image_ocv, cv::Size(VIDEO_SIZE, VIDEO_SIZE));
-        writer << image_ocv;
+        cv::resize(outimg, outimg, cv::Size(VIDEO_SIZE, VIDEO_SIZE));
+        writer << outimg;
 #endif
 #endif
     }
