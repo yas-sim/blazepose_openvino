@@ -641,8 +641,8 @@ int main(int argc, char *argv[]) {
 
         // pose (ROI) detection
         cv::resize(image_ocv, image_pd, cv::Size(idims_pd[_W], idims_pd[_H]));
-        //image_pd.convertTo(image_f, CV_32F, (1.f / 255.f), 0.f);                    // Convert to FP32 and do pre-processes (scale and mean subtract)
-        image_pd.convertTo(image_f, CV_32F, (1.f / 127.5f), -1.f);                    // Convert to FP32 and do pre-processes (scale and mean subtract)
+        image_pd.convertTo(image_f, CV_32F, (1.f / 255.f), 0.f);                    // Convert to FP32 and do pre-processes (scale and mean subtract)
+        //image_pd.convertTo(image_f, CV_32F, (1.f / 127.5f), -1.f);                    // Convert to FP32 and do pre-processes (scale and mean subtract)
         ie::TensorDesc tDesc(ie::Precision::FP32, { 1, static_cast<unsigned int>(image_f.channels()), static_cast<unsigned int>(image_f.size().height), static_cast<unsigned int>(image_f.size().width) }, ie::Layout::NHWC);
         ireq_pd.SetBlob(input_name_pd, ie::make_shared_blob<float>(tDesc, (float*)(image_f.data)));
 
@@ -679,8 +679,8 @@ int main(int argc, char *argv[]) {
             cv::Mat img_affine = cv::Mat::zeros(idims_lm[_W], idims_lm[_H], CV_8UC3);
             cv::warpAffine(image_ocv, img_affine, mat, img_affine.size());              // Crop and rotate ROI by warp affine transform
 
-            //img_affine.convertTo(image_f, CV_32F, (1.f / 255.f), 0.f);
-            img_affine.convertTo(image_f, CV_32F, (1.f / 127.5f), -1.f);
+            img_affine.convertTo(image_f, CV_32F, (1.f / 255.f), 0.f);
+            //img_affine.convertTo(image_f, CV_32F, (1.f / 127.5f), -1.f);
             tDesc = ie::TensorDesc(ie::Precision::FP32, { 1, (unsigned int)(image_f.channels()), (unsigned int)(image_f.size().height), (unsigned int)(image_f.size().width) }, ie::Layout::NHWC);
             ireq_lm.SetBlob(input_name_lm, ie::make_shared_blob<float>(tDesc, (float*)(image_f.data)));
 
