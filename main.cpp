@@ -14,6 +14,7 @@
 #include <vector>
 #include <string>
 #include <chrono>
+#include <list>
 
 #include <opencv2/opencv.hpp>
 #include <inference_engine.hpp>
